@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { UserFormDto } from './dto/user.form.dto';
 import {hash, verify} from 'argon2'
@@ -6,9 +6,19 @@ import { VerificationToken } from './utils/create-verification-token';
 import { getFutureDate } from './utils';
 import { IdDto } from './dto/id.dto';
 import { JwtService } from '@nestjs/jwt';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
+import base64url from 'base64url';
+import crypto from 'crypto';
+import { PasswordDto } from './dto/password.dto';
 @Injectable()
 export class AuthService {
-    constructor(private prisma:PrismaService,private verificationToken:VerificationToken,private jwtService:JwtService){}
+    constructor(
+        private prisma:PrismaService,
+        private verificationToken:VerificationToken,
+        private jwtService:JwtService,
+        @Inject(CACHE_MANAGER) private cacheManager:Cache
+    ){}
     async signUp(data:UserFormDto, ip:string, user_agent:string){
         const {email,password} = data;
         const isExistingUser = await this.prisma.user.findUnique({where:{email}});
@@ -19,6 +29,11 @@ export class AuthService {
             data:{
                 email,
                 password:hashed_password
+            },
+            select:{
+                email:true,
+                id:true,
+                isEmailVerified:true
             }
         });
          const session = await this.prisma.session.create({
@@ -65,6 +80,11 @@ export class AuthService {
             },
             data:{
                 isEmailVerified:new Date()
+            },
+                   select:{
+                email:true,
+                id:true,
+                isEmailVerified:true
             }
         });
         const session = await this.prisma.session.update({
@@ -93,9 +113,15 @@ export class AuthService {
             message:'user verified'
         }
     }
-      async signIn(data:UserFormDto, ip:string, user_agent:string){
+    async signIn(data:UserFormDto, ip:string, user_agent:string){
         const {email,password} = data;
-        const user = await this.prisma.user.findUnique({where:{email}});
+        const user = await this.prisma.user.findUnique({where:{email},   
+                select:{
+                email:true,
+                id:true,
+                isEmailVerified:true,
+                password:true
+            }});
         if(!user) throw new NotFoundException("Invalid creadentials");
         if(!ip || !user_agent) throw new BadRequestException("missing data");
         const isCorrectPasswrd = await verify(user.password,password,{secret:Buffer.from(process.env.AUTH_SECRET!)});
@@ -122,5 +148,92 @@ export class AuthService {
             token:jwt_token
         }
         
+    }
+    async VerifyToken(token:string){
+        const cahceSession = await this.cacheManager.get(`sess:${token}`);
+        if(cahceSession) {
+            console.log('cache hit for session ---------------------->', cahceSession)
+            return {session: cahceSession}
+        }
+        const session = await this.prisma.session.update({
+            where:{
+                id:token,
+                expiresAt: {gt: new Date()}
+            },
+            data:{
+                LastAccess :new Date()
+            },
+            select:{
+                id:true,
+                expiresAt:true,
+                user: {
+                    select:{
+                        id:true,
+                        email:true,
+                        isEmailVerified:true,
+                        createdAt:true
+                    }
+                },
+            }
+        });
+        if(!session) throw new NotFoundException("invalid token");
+        await this.cacheManager.set(`sess:${token}`,session,6000)
+        return {session}
+    }
+    async Logout(token:string){
+ const cahceSession = await this.cacheManager.get(`sess:${token}`);
+        if(cahceSession) {
+            console.log('cache hit for session ---------------------->', cahceSession)
+            await this.cacheManager.del(`sess:${token}`)
+        }
+        const session = await this.prisma.session.delete({
+            where:{
+                id:token,
+            }
+        });
+        if(!session) throw new NotFoundException("invalid token");
+        return {success:true}
+    }
+    async GenerateResetPasswordLink(email:string, ip:string, agent:string){
+        const user = await this.prisma.user.findUnique({
+            where:{
+                email
+            }
+        });
+        if(!user) throw new NotFoundException("user not found");
+        const token = await this.verificationToken.generateToken(ip,agent,user.id);
+        //TODO send email 
+        const encoded = base64url.encode(token.id);
+        return {token:encoded}
+    }
+    async resetPassword(token:string, data:PasswordDto, agent:string){
+        const id  = base64url.decode(token);
+        const verification_token  = await this.prisma.verification_Token.findFirst({
+            where:{
+                id,
+                userAgent:agent,
+                code:data.code
+            }
+        });
+        if(!verification_token) throw new NotFoundException("invalid token");
+        const  hashed_password = await hash(data.password,{secret:Buffer.from(process.env.AUTH_SECRET!)});
+        await this.prisma.user.update({
+            where:{
+                id:verification_token.user_id
+            },
+            data:{
+                password:hashed_password
+            }
+        });
+        //TODO Send email
+        await this.prisma.verification_Token.delete({where:{id}})
+        await this.prisma.session.deleteMany({
+            where:{
+                user_id:verification_token.user_id
+            }
+        });
+        
+        return {success:true}
+
     }
 }
