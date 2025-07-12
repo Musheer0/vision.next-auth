@@ -1,6 +1,8 @@
-import { IsString } from "class-validator";
+import { IsString, MaxLength, MinLength } from "class-validator";
 
-export class IdDto {
+export class CodeDto {
     @IsString()
-    id:string
+    @MinLength(6)
+    @MaxLength(6)
+    code:string
 }

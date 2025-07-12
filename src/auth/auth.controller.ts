@@ -3,7 +3,7 @@ import { Body, Ip, Post } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { UserFormDto } from './dto/user.form.dto';
 import { UserAgent } from './decorators/user-agent.decorator';
-import { IdDto } from './dto/id.dto';
+import { CodeDto } from './dto/id.dto';
 import { JwtAuthGuard } from './guards/auth.guard';
 import { User } from './decorators/user.decorator';
 import { EmailDto } from './dto/email.dto';
@@ -21,9 +21,9 @@ export class AuthController {
     return this.authService.signIn(body, ip, agent);
   }
   @UseGuards(JwtAuthGuard)
-  @Post('/verify/email')
-  verifyEmail(@Body() body:IdDto, @Ip() ip , @UserAgent() agent,@User() user){
-    return this.authService.VerifyEmail(body,agent,ip, user.id);
+  @Post('/verify/email/:id')
+  verifyEmail(@Body() body:CodeDto,@User() user, @Param('id') id){
+    return this.authService.VerifyEmail(body, user.id,id);
   }
   @UseGuards(JwtAuthGuard)
   @Get('/verify/token')
@@ -33,7 +33,6 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @Delete('/logout')
   logout (@User() user){
-    console.log(user)
     return this.authService.Logout(user.token)
   }
   @Post('/generate/reset-password')

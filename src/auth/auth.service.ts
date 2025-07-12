@@ -4,7 +4,7 @@ import { UserFormDto } from './dto/user.form.dto';
 import {hash, verify} from 'argon2'
 import { VerificationToken } from './utils/create-verification-token';
 import { getFutureDate } from './utils';
-import { IdDto } from './dto/id.dto';
+import { CodeDto } from './dto/id.dto';
 import { JwtService } from '@nestjs/jwt';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
@@ -63,20 +63,21 @@ export class AuthService {
         }
         
     }
-    async VerifyEmail(data:IdDto,user_agent:string, ip:string,userId:string){
-        const {id} = data;
+    async VerifyEmail(data:CodeDto,userId:string,id:string){
+        const {code} = data;
         const verification_token = await this.prisma.verification_Token.findFirst({
             where:{
                 id,
-                userAgent:user_agent,
-                user_id:userId
+                user_id:userId,
             }
         });
-        if(!verification_token || !verification_token.session_id) throw new NotFoundException("token not found");
+
+        if(!verification_token || verification_token.code!==code) throw new NotFoundException("token not found");
         if(new Date(verification_token.expiresAt)<new Date()){
-            throw new BadRequestException("token expired")
+                    await this.prisma.verification_Token.delete({where:{id}});
+            throw new BadRequestException("token expired");
         }
-       const user =  await this.prisma.user.update({
+       await this.prisma.user.update({
             where:{
                 id:verification_token.user_id
             },
@@ -89,31 +90,17 @@ export class AuthService {
                 isEmailVerified:true
             }
         });
-        const session = await this.prisma.session.update({
+        if(verification_token.session_id) {
+             await this.prisma.session.delete({
             where:{
                 id:verification_token.session_id,
                 user_id:userId
             },
-            data:{
-                user_id: verification_token.user_id,
-                expiresAt: getFutureDate(15),
-                userAgent:user_agent,
-                ip
-            }
         });
-        await this.prisma.verification_Token.delete({where:{id}});
-        const token = {
-            email:user.email,
-            token:session.id,
-            isVerified:user.isEmailVerified,
-            id:user.id
-        };
-        const jwt_token = await this.jwtService.sign(token)
-        return {
-            token: jwt_token,
-            expiresAt:session.expiresAt,
-            message:'user verified'
         }
+        await this.prisma.verification_Token.delete({where:{id}});
+        return {success:true}
+       
     }
     async signIn(data:UserFormDto, ip:string, user_agent:string){
         const {email,password} = data;
@@ -154,7 +141,6 @@ export class AuthService {
     async VerifyToken(token:string){
         const cahceSession = await this.cacheManager.get(`sess:${token}`);
         if(cahceSession) {
-            console.log('cache hit for session ---------------------->', cahceSession)
             return {session: cahceSession}
         }
         const session = await this.prisma.session.update({
@@ -185,7 +171,6 @@ export class AuthService {
     async Logout(token:string){
  const cahceSession = await this.cacheManager.get(`sess:${token}`);
         if(cahceSession) {
-            console.log('cache hit for session ---------------------->', cahceSession)
             await this.cacheManager.del(`sess:${token}`)
         }
         const session = await this.prisma.session.delete({
@@ -196,46 +181,78 @@ export class AuthService {
         if(!session) throw new NotFoundException("invalid token");
         return {success:true}
     }
-    async GenerateResetPasswordLink(email:string, ip:string, agent:string){
-        const user = await this.prisma.user.findUnique({
-            where:{
-                email
-            }
-        });
-        if(!user) throw new NotFoundException("user not found");
-        const token = await this.verificationToken.generateToken(ip,agent,user.id);
-        //TODO send email 
-        const encoded = base64url.encode(token.id);
-        return {token:encoded}
-    }
-    async resetPassword(token:string, data:PasswordDto, agent:string){
-        const id  = base64url.decode(token);
-        const verification_token  = await this.prisma.verification_Token.findFirst({
-            where:{
-                id,
-                userAgent:agent,
-                code:data.code
-            }
-        });
-        if(!verification_token) throw new NotFoundException("invalid token");
-        const  hashed_password = await hash(data.password,{secret:Buffer.from(process.env.AUTH_SECRET!)});
-        await this.prisma.user.update({
-            where:{
-                id:verification_token.user_id
-            },
-            data:{
-                password:hashed_password
-            }
-        });
-        //TODO Send email
-        await this.prisma.verification_Token.delete({where:{id}})
-        await this.prisma.session.deleteMany({
-            where:{
-                user_id:verification_token.user_id
-            }
-        });
-        
-        return {success:true}
+   async GenerateResetPasswordLink(email: string, ip: string, agent: string) {
+    const user = await this.prisma.user.findUnique({
+        where: { email },
+        select: {
+            id: true,
+            isEmailVerified: true,
+            email: true
+        }
+    });
 
+    if (!user) throw new NotFoundException("user not found");
+
+    if (!user.isEmailVerified) {
+        const token = await this.verificationToken.generateToken(ip, agent, user.id);
+        this.client.emit('verify.email', { code: token.code, email: user.email });
+
+        throw new BadRequestException("Email not verified. Verification email sent.");
     }
+
+    const resetToken = await this.verificationToken.generateToken(ip, agent, user.id);
+    if(!resetToken) throw new BadRequestException("error creating token")
+    this.client.emit('verify.password', { code: resetToken.code, email: user.email });
+
+    const encoded = base64url.encode(resetToken.id);
+    return { token: encoded };
+}
+
+   async resetPassword(token: string, data: PasswordDto, agent: string) {
+    const id = base64url.decode(token);
+
+    const verification_token = await this.prisma.verification_Token.findFirst({
+        where: {
+            id,
+            userAgent: agent,
+            code: data.code
+        }
+    });
+
+    if (!verification_token) throw new NotFoundException("Invalid or expired reset token");
+
+    const user = await this.prisma.user.findUnique({
+        where: { id: verification_token.user_id },
+        select: { isEmailVerified: true, email: true }
+    });
+
+    if (!user) throw new NotFoundException("User not found");
+
+    if (!user.isEmailVerified) {
+        const reverify = await this.verificationToken.generateToken("0.0.0.0", agent, verification_token.user_id); // optional IP fallback
+        this.client.emit("verify.email", { code: reverify.code, email: user.email });
+
+        throw new BadRequestException("Email not verified. Verification email sent.");
+    }
+
+    const hashed_password = await hash(data.password, { secret: Buffer.from(process.env.AUTH_SECRET!) });
+
+    await this.prisma.user.update({
+        where: { id: verification_token.user_id },
+        data: { password: hashed_password }
+    });
+
+    this.client.emit('notify.password', user.email);
+
+    await this.prisma.verification_Token.delete({ where: { id } });
+
+    await this.prisma.session.deleteMany({
+        where: {
+            user_id: verification_token.user_id
+        }
+    });
+
+    return { success: true };
+}
+
 }
