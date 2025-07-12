@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { PrismaModule } from './prisma/prisma.module';
@@ -9,6 +9,7 @@ import { Keyv } from 'keyv';
 import { CacheableMemory } from 'cacheable';
 
 import { CacheModule } from '@nestjs/cache-manager';
+@Global()
 @Module({
   imports: [PrismaModule, AuthModule,
     ThrottlerModule.forRoot({
@@ -23,8 +24,8 @@ import { CacheModule } from '@nestjs/cache-manager';
       useFactory: async () => {
         return {
           stores: [
-             new Keyv(new KeyvRedis('redis://localhost:6379')), // ✅ Redis is first (Primary)
-        new Keyv({ store: new CacheableMemory({ ttl: 60000, lruSize: 5000 }) }), // 🛟 Memory fallback
+             new Keyv(new KeyvRedis('redis://localhost:6379')), 
+        new Keyv({ store: new CacheableMemory({ ttl: 60000, lruSize: 5000 }) }), 
           ],
         };
       },

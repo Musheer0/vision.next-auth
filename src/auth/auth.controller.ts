@@ -33,6 +33,7 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @Delete('/logout')
   logout (@User() user){
+    console.log(user)
     return this.authService.Logout(user.token)
   }
   @Post('/generate/reset-password')

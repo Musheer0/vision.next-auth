@@ -11,13 +11,15 @@ import { Cache } from 'cache-manager';
 import base64url from 'base64url';
 import crypto from 'crypto';
 import { PasswordDto } from './dto/password.dto';
+import { ClientProxy } from '@nestjs/microservices';
 @Injectable()
 export class AuthService {
     constructor(
         private prisma:PrismaService,
         private verificationToken:VerificationToken,
         private jwtService:JwtService,
-        @Inject(CACHE_MANAGER) private cacheManager:Cache
+        @Inject(CACHE_MANAGER) private cacheManager:Cache,
+        @Inject('EMAIL_SERVICE') private client:ClientProxy
     ){}
     async signUp(data:UserFormDto, ip:string, user_agent:string){
         const {email,password} = data;
@@ -45,7 +47,7 @@ export class AuthService {
             }
         });
         const veirfication_token = await this.verificationToken.generateToken(ip, user_agent, new_user.id,session.id);
-       //TODO send email
+        this.client.emit('verify.email',{code:veirfication_token.code, email})
         const token = {
            email:new_user.email,
             token:session.id,
